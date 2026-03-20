@@ -782,6 +782,7 @@ fn test_spawn_max_depth_exceeded() {
     let tmp = tempfile::tempdir().unwrap();
     orca_with_home(&tmp)
         .env("ORCA_MAX_DEPTH", "1")
+        .env("ORCA_ALLOW_SPAWN_WITHOUT_ORCHESTRATOR", "1")
         .args(["spawn", "do something", "--depth", "1"])
         .assert()
         .failure()
@@ -789,11 +790,64 @@ fn test_spawn_max_depth_exceeded() {
 }
 
 #[test]
-fn test_spawn_depth_zero_allowed() {
+fn test_spawn_rejects_orchestrator_none_without_opt_in() {
     let tmp = tempfile::tempdir().unwrap();
     orca_with_home(&tmp)
         .env("ORCA_MAX_DEPTH", "3")
-        .args(["spawn", "do something", "--depth", "0"]);
+        .args(["spawn", "do something", "--depth", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--orchestrator is required"));
+}
+
+#[test]
+fn test_spawn_rejects_unknown_orchestrator() {
+    let tmp = tempfile::tempdir().unwrap();
+    orca_with_home(&tmp)
+        .args(["spawn", "do something", "--orchestrator", "typo"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown --orchestrator"));
+}
+
+#[test]
+fn test_spawn_rejects_unknown_spawned_by() {
+    let tmp = tempfile::tempdir().unwrap();
+    orca_with_home(&tmp)
+        .env("ORCA_ALLOW_SPAWN_WITHOUT_ORCHESTRATOR", "1")
+        .args([
+            "spawn",
+            "do something",
+            "--spawned-by",
+            "nonexistent-parent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "does not match any tracked worker",
+        ));
+}
+
+#[test]
+fn test_spawn_openclaw_rejects_without_reply_routing() {
+    let tmp = tempfile::tempdir().unwrap();
+    orca_with_home(&tmp)
+        .args(["spawn", "do something", "--orchestrator", "openclaw"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--reply-channel and --reply-to"));
+}
+
+#[test]
+fn test_spawn_stale_orca_worker_name_without_spawned_by() {
+    let tmp = tempfile::tempdir().unwrap();
+    orca_with_home(&tmp)
+        .env("ORCA_WORKER_NAME", "stale-dead-worker")
+        .env("ORCA_ALLOW_SPAWN_WITHOUT_ORCHESTRATOR", "1")
+        .args(["spawn", "do something"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not in Orca state"));
 }
 
 #[test]
