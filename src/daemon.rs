@@ -68,11 +68,11 @@ fn now_secs() -> f64 {
 fn log_msg(msg: &str) {
     let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
     let line = format!("[{ts}] {msg}\n");
-    if let Ok(mut f) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(config::daemon_log_file())
-    {
+    let path = config::daemon_log_file();
+    if std::fs::create_dir_all(config::orca_home()).is_err() {
+        return;
+    }
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = f.write_all(line.as_bytes());
     }
 }
@@ -117,8 +117,10 @@ fn release_pid_lock() {
         unsafe {
             libc::close(fd);
         }
+        // Only unlink the pidfile when we held the daemon lock; otherwise a no-op
+        // release (e.g. tests) must not delete the file — parallel tests share one path.
+        let _ = fs::remove_file(config::daemon_pid_file());
     }
-    let _ = fs::remove_file(config::daemon_pid_file());
 }
 
 fn remove_pid() {
@@ -302,7 +304,7 @@ async fn check_workers_inner(ds: &mut DaemonState) {
 async fn check_stuck(
     name: &str,
     worker: &Worker,
-    all_workers: &HashMap<String, Worker>,
+    _all_workers: &HashMap<String, Worker>,
     ds: &mut DaemonState,
 ) {
     let ea = event_age_secs(worker);
@@ -342,9 +344,7 @@ async fn check_stuck(
             return;
         }
 
-        let has_running_children = all_workers
-            .values()
-            .any(|w| w.spawned_by == name && w.status == "running");
+        let has_running_children = state::has_running_children(name);
         if has_running_children {
             ds.had_children.insert(name.to_string(), true);
             ds.idle_seen.remove(name);
@@ -694,8 +694,15 @@ mod tests {
     /// We recover from poisoned state so a panic in one test doesn't cascade.
     static PID_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Same cached `ORCA_HOME` implies one `daemon.log`; tests that delete or read it must not run in parallel.
+    static LOG_FILE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn lock_pid_file() -> std::sync::MutexGuard<'static, ()> {
         PID_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_daemon_log_tests() -> std::sync::MutexGuard<'static, ()> {
+        LOG_FILE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn init_test_home() {
@@ -852,6 +859,7 @@ mod tests {
 
     #[test]
     fn test_log_msg_writes_to_file() {
+        let _log_lock = lock_daemon_log_tests();
         init_test_home();
         let _ = config::ensure_home();
         let log_path = config::daemon_log_file();
@@ -867,6 +875,7 @@ mod tests {
 
     #[test]
     fn test_log_msg_appends() {
+        let _log_lock = lock_daemon_log_tests();
         init_test_home();
         let _ = config::ensure_home();
         let log_path = config::daemon_log_file();
@@ -1643,8 +1652,9 @@ mod tests {
 
     #[test]
     fn test_log_msg_format_has_iso_timestamp() {
+        let _log_lock = lock_daemon_log_tests();
         init_test_home();
-        let _ = config::ensure_home();
+        config::ensure_home().expect("ensure_home for daemon.log");
 
         let marker = format!("format_check_{}", std::process::id());
         log_msg(&marker);
@@ -1666,6 +1676,7 @@ mod tests {
 
     #[test]
     fn test_log_msg_each_line_ends_with_newline() {
+        let _log_lock = lock_daemon_log_tests();
         init_test_home();
         let _ = config::ensure_home();
 
