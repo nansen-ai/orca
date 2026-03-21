@@ -500,6 +500,7 @@ async fn control_mode_loop(state: &std::sync::Arc<Mutex<DaemonState>>) {
 
         let child = Command::new("tmux")
             .args(&args)
+            .current_dir(tmux::stable_cwd())
             .stdin(std::process::Stdio::piped()) // must stay open for control mode
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -582,6 +583,10 @@ pub async fn run_daemon() {
     }
 
     let _guard = scopeguard::guard((), |_| release_pid_lock());
+
+    // Inherited cwd may be a removed worktree; subprocesses and libraries that
+    // call getcwd (e.g. openclaw / Node uv_cwd) must not run with ENOENT cwd.
+    tmux::ensure_process_cwd_stable();
 
     log_msg(&format!("Daemon started (pid={})", process::id()));
 
@@ -666,13 +671,10 @@ pub fn start_daemon_background() -> u32 {
 
         // Grandchild: the actual daemon
 
-        // Change to a stable directory so subprocesses don't crash
-        // when the inherited cwd is a worktree that gets deleted later.
-        if let Some(home) = dirs::home_dir()
-            && let Ok(home_c) = std::ffi::CString::new(home.to_string_lossy().as_ref())
-        {
-            libc::chdir(home_c.as_ptr());
-        }
+        // Change to a stable directory so subprocesses don't crash when the
+        // inherited cwd is a worktree that gets deleted later. `run_daemon`
+        // also calls `ensure_process_cwd_stable` after lock acquisition.
+        let _ = std::env::set_current_dir(crate::tmux::stable_cwd());
 
         // Close inherited FDs
         let max_fd = libc::sysconf(libc::_SC_OPEN_MAX);

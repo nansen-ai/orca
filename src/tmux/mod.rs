@@ -14,13 +14,31 @@ use crate::prompts::{detect_prompt, handle_simple_prompt};
 // Low-level helpers
 // ---------------------------------------------------------------------------
 
-/// A stable directory for subprocess cwd.
+/// A stable directory for subprocess cwd and for [`ensure_process_cwd_stable`].
 ///
 /// The daemon may inherit a cwd pointing to a deleted worktree; subprocesses
 /// (especially Node.js-based tools like `openclaw`) crash if their cwd is gone.
-/// We use `$HOME` as a safe fallback.
-fn stable_cwd() -> std::path::PathBuf {
-    dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"))
+/// We prefer `$HOME` when it exists; otherwise `/`.
+pub(crate) fn stable_cwd() -> std::path::PathBuf {
+    if let Some(home) = dirs::home_dir()
+        && home.is_dir()
+    {
+        return home;
+    }
+    std::path::PathBuf::from("/")
+}
+
+/// Move this process to [`stable_cwd`] so `std::env::current_dir` and libraries
+/// that probe the process cwd (e.g. Node/libuv) never see a deleted directory.
+///
+/// [`run_out`] already sets per-child cwd; call this once in long-lived
+/// processes such as the daemon so the inherited cwd cannot go stale.
+pub(crate) fn ensure_process_cwd_stable() {
+    let target = stable_cwd();
+    if std::env::set_current_dir(&target).is_ok() {
+        return;
+    }
+    let _ = std::env::set_current_dir(std::path::Path::new("/"));
 }
 
 /// Run a command and return (exit_code, stdout, stderr).

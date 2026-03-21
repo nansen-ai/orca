@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **OpenClaw `uv_cwd` / ENOENT when the worktree is gone:** the daemon and its subprocesses no longer rely on an inherited cwd that may already be removed. The daemon moves to a stable directory at startup (home when present, else `/`), the post-fork chdir uses the same logic, and the tmux control-mode child is spawned with that cwd. This prevents Node/libuv from failing before `openclaw system event` can run.
 - **Replace panic with graceful error on fork failure:** `start_daemon_background()` no longer panics when `fork()` fails — it prints an error and returns 0 (callers already handle this as "daemon not started").
 - **Avoid regex recompilation in `sh_quote()`:** the shell-safe regex is now compiled once via `LazyLock` instead of on every call.
 - **Deduplicate `depth_emoji()`:** removed the identical copy from `cli/mod.rs`; both `cli` and `spawn` now share the single definition in `spawn`.
