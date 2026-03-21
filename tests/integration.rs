@@ -39,8 +39,8 @@ fn seed_worker(tmp: &tempfile::TempDir, name: &str, status: &str) {
             "orchestrator_pane": "",
             "session_id": "",
             "pane_id": "",
-            "depth": 0,
-            "spawned_by": "",
+            "depth": 1,
+            "spawned_by": "openclaw",
             "layout": "window",
             "status": status,
             "started_at": "2026-01-01T00:00:00Z",
@@ -581,8 +581,8 @@ fn test_killall_by_session_id() {
                 "orchestrator_pane": "",
                 "session_id": "my-session-123",
                 "pane_id": "",
-                "depth": 0,
-                "spawned_by": "",
+                "depth": 1,
+                "spawned_by": "openclaw",
                 "layout": "window",
                 "status": "running",
                 "started_at": "2026-01-01T00:00:00Z",
@@ -601,8 +601,8 @@ fn test_killall_by_session_id() {
                 "orchestrator_pane": "",
                 "session_id": "different-session",
                 "pane_id": "",
-                "depth": 0,
-                "spawned_by": "",
+                "depth": 1,
+                "spawned_by": "openclaw",
                 "layout": "window",
                 "status": "running",
                 "started_at": "2026-01-01T00:00:00Z",
@@ -780,10 +780,11 @@ fn test_hooks_uninstall_runs() {
 #[test]
 fn test_spawn_max_depth_exceeded() {
     let tmp = tempfile::tempdir().unwrap();
+    // With ORCA_MAX_DEPTH=0, any spawn (which produces depth >= 1) exceeds the limit
     orca_with_home(&tmp)
-        .env("ORCA_MAX_DEPTH", "1")
+        .env("ORCA_MAX_DEPTH", "0")
         .env("ORCA_ALLOW_SPAWN_WITHOUT_ORCHESTRATOR", "1")
-        .args(["spawn", "do something", "--depth", "1"])
+        .args(["spawn", "do something", "--spawned-by", "root"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("max orchestration depth"));
@@ -794,7 +795,14 @@ fn test_spawn_rejects_orchestrator_none_without_opt_in() {
     let tmp = tempfile::tempdir().unwrap();
     orca_with_home(&tmp)
         .env("ORCA_MAX_DEPTH", "3")
-        .args(["spawn", "do something", "--depth", "0"])
+        .args([
+            "spawn",
+            "do something",
+            "--depth",
+            "0",
+            "--spawned-by",
+            "root",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("--orchestrator is required"));
@@ -804,7 +812,14 @@ fn test_spawn_rejects_orchestrator_none_without_opt_in() {
 fn test_spawn_rejects_unknown_orchestrator() {
     let tmp = tempfile::tempdir().unwrap();
     orca_with_home(&tmp)
-        .args(["spawn", "do something", "--orchestrator", "typo"])
+        .args([
+            "spawn",
+            "do something",
+            "--orchestrator",
+            "typo",
+            "--spawned-by",
+            "root",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown --orchestrator"));
@@ -832,7 +847,14 @@ fn test_spawn_rejects_unknown_spawned_by() {
 fn test_spawn_openclaw_rejects_without_reply_routing() {
     let tmp = tempfile::tempdir().unwrap();
     orca_with_home(&tmp)
-        .args(["spawn", "do something", "--orchestrator", "openclaw"])
+        .args([
+            "spawn",
+            "do something",
+            "--orchestrator",
+            "openclaw",
+            "--spawned-by",
+            "root",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("--reply-channel and --reply-to"));
@@ -844,7 +866,7 @@ fn test_spawn_stale_orca_worker_name_without_spawned_by() {
     orca_with_home(&tmp)
         .env("ORCA_WORKER_NAME", "stale-dead-worker")
         .env("ORCA_ALLOW_SPAWN_WITHOUT_ORCHESTRATOR", "1")
-        .args(["spawn", "do something"])
+        .args(["spawn", "do something", "--spawned-by", "root"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("not in Orca state"));
@@ -1065,8 +1087,8 @@ fn test_killall_pane_filter() {
                 "orchestrator_pane": "%42",
                 "session_id": "",
                 "pane_id": "",
-                "depth": 0,
-                "spawned_by": "",
+                "depth": 1,
+                "spawned_by": "openclaw",
                 "layout": "window",
                 "status": "running",
                 "started_at": "2026-01-01T00:00:00Z",
@@ -1085,8 +1107,8 @@ fn test_killall_pane_filter() {
                 "orchestrator_pane": "%99",
                 "session_id": "",
                 "pane_id": "",
-                "depth": 0,
-                "spawned_by": "",
+                "depth": 1,
+                "spawned_by": "openclaw",
                 "layout": "window",
                 "status": "running",
                 "started_at": "2026-01-01T00:00:00Z",
