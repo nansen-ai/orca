@@ -12,6 +12,7 @@ use crate::events;
 use crate::spawn::{self, SpawnOptions, depth_emoji, truncate_task};
 use crate::state::{self, Worker};
 use crate::tmux;
+use crate::types::{Backend, Orchestrator, WorkerStatus};
 use crate::worktree;
 
 use crate::config::audit;
@@ -64,14 +65,15 @@ fn make_l0_worker(
     session_id: &str,
     base_branch: &str,
 ) -> Worker {
+    let b = backend.parse::<Backend>().unwrap_or(Backend::Claude);
     Worker {
         name: name.to_string(),
-        backend: backend.to_string(),
+        backend: b,
         task: String::new(),
         dir: dir.to_string(),
         workdir: dir.to_string(),
         base_branch: base_branch.to_string(),
-        orchestrator: backend.to_string(),
+        orchestrator: Orchestrator::Backend(b),
         orchestrator_pane: String::new(),
         session_id: session_id.to_string(),
         reply_channel: String::new(),
@@ -81,7 +83,7 @@ fn make_l0_worker(
         depth: 0,
         spawned_by: String::new(),
         layout: "window".to_string(),
-        status: "running".to_string(),
+        status: WorkerStatus::Running,
         started_at: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         last_event_at: String::new(),
         done_reported: false,
@@ -832,7 +834,7 @@ fn cmd_status(name: &str) {
     println!("Dir: {}", w.workdir);
     println!("Started: {}", relative_time(&w.started_at));
 
-    if w.status == "running" {
+    if w.status == WorkerStatus::Running {
         let log_path = config::logs_dir().join(format!("{name}.log"));
         let mut tail_text = String::new();
 
@@ -957,7 +959,7 @@ fn report_field_updates(event: &str, timestamp: &str) -> HashMap<String, serde_j
         "blocked" => {
             updates.insert(
                 "status".to_string(),
-                serde_json::Value::String("blocked".to_string()),
+                serde_json::Value::String(WorkerStatus::Blocked.to_string()),
             );
         }
         "process_exit" => {
@@ -1028,7 +1030,7 @@ fn cmd_steer(name: &str, message: Vec<String>) {
         process::exit(1);
     };
 
-    if w.status != "running" && w.status != "blocked" {
+    if !w.status.is_active() {
         eprintln!(
             "Error: Worker '{name}' is {}, not running/blocked",
             w.status
@@ -1036,8 +1038,8 @@ fn cmd_steer(name: &str, message: Vec<String>) {
         process::exit(1);
     }
 
-    if w.status == "blocked" {
-        let _ = state::update_worker_status(name, "running");
+    if w.status == WorkerStatus::Blocked {
+        let _ = state::update_worker_status(name, WorkerStatus::Running);
     }
 
     let target = worker_target(&w);
@@ -1180,8 +1182,12 @@ fn cmd_killall(mut pane: String, session_id: String, mine: bool, force: bool, no
         return;
     }
 
+    // Sort deepest-first so child worktrees are removed before parents
+    let mut sorted: Vec<(String, Worker)> = killable.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.depth.cmp(&a.1.depth));
+
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-    for (wname, w) in &killable {
+    for (wname, w) in &sorted {
         rt.block_on(async {
             if !w.pane_id.is_empty() && tmux::pane_alive(&w.pane_id).await {
                 tmux::kill_pane(&w.pane_id).await;
@@ -1198,11 +1204,18 @@ fn cmd_killall(mut pane: String, session_id: String, mine: bool, force: bool, no
         });
     }
 
-    let killed_names: Vec<String> = killable.keys().cloned().collect();
+    let killed_names: Vec<String> = sorted.iter().map(|(n, _)| n.clone()).collect();
     for wname in &killed_names {
         let _ = state::remove_worker(wname);
         println!("Killed: {wname}");
     }
+
+    // Clean up L0 orchestrator entries that have no remaining children.
+    let orphaned_l0 = gc_orphaned_l0();
+    for l0_name in &orphaned_l0 {
+        println!("Removed orphaned L0: {l0_name}");
+    }
+
     let scope = if force {
         "force".to_string()
     } else if mine {
@@ -1238,16 +1251,18 @@ fn cmd_gc(mut pane: String, session_id: String, mine: bool, force: bool, no_stas
     } else {
         filter_workers_by_scope(&all_workers, &pane, &session_id)
     };
-    let to_gc: Vec<(String, Worker)> = scoped
+    let mut to_gc: Vec<(String, Worker)> = scoped
         .into_iter()
         .filter(|(_, w)| {
             // Skip L0 orchestrator entries — they are bookkeeping, not GC-able
             if w.depth == 0 && w.spawned_by.is_empty() {
                 return false;
             }
-            matches!(w.status.as_str(), "done" | "dead" | "destroyed")
+            w.status.is_terminal()
         })
         .collect();
+    // Sort deepest-first so child worktrees are removed before parents
+    to_gc.sort_by(|a, b| b.1.depth.cmp(&a.1.depth));
 
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     for (name, w) in &to_gc {
@@ -1283,6 +1298,12 @@ fn cmd_gc(mut pane: String, session_id: String, mine: bool, force: bool, no_stas
         removed.extend(extra);
     }
 
+    // Clean up L0 orchestrator entries that have no remaining children.
+    let orphaned_l0 = gc_orphaned_l0();
+    if !orphaned_l0.is_empty() {
+        removed.extend(orphaned_l0);
+    }
+
     if !removed.is_empty() {
         let scope = if force {
             "force".to_string()
@@ -1298,6 +1319,26 @@ fn cmd_gc(mut pane: String, session_id: String, mine: bool, force: bool, no_stas
     } else {
         println!("Nothing to clean.");
     }
+}
+
+/// Remove L0 orchestrator entries that have no remaining children in state.
+/// Returns the names of removed L0 entries.
+fn gc_orphaned_l0() -> Vec<String> {
+    let workers = state::load_workers();
+    let children_of: HashSet<&str> = workers
+        .values()
+        .filter(|w| !(w.depth == 0 && w.spawned_by.is_empty()))
+        .map(|w| w.spawned_by.as_str())
+        .collect();
+
+    let mut removed = Vec::new();
+    for (name, w) in &workers {
+        if w.depth == 0 && w.spawned_by.is_empty() && !children_of.contains(name.as_str()) {
+            let _ = state::remove_worker(name);
+            removed.push(name.clone());
+        }
+    }
+    removed
 }
 
 // ---------------------------------------------------------------------------
@@ -1445,7 +1486,7 @@ fn print_tree(workers: &HashMap<String, Worker>) {
     // First: registered L0 entries
     for l0 in &l0_entries {
         let kids = children.get(&l0.name).cloned().unwrap_or_default();
-        l0_groups.push((l0.name.clone(), l0.backend.clone(), kids));
+        l0_groups.push((l0.name.clone(), l0.backend.to_string(), kids));
     }
 
     // Workers with empty spawned_by that aren't L0 entries themselves
@@ -1508,14 +1549,7 @@ fn print_node(
     let has_kids = children.get(name).is_some_and(|k| !k.is_empty());
     let role = if has_kids { "orc" } else { "wrk" };
 
-    let si = match w.status.as_str() {
-        "running" => "▶",
-        "blocked" => "⏸",
-        "done" => "✓",
-        "dead" => "✗",
-        "destroyed" => "💀",
-        _ => "?",
-    };
+    let si = w.status.symbol();
 
     println!(
         "{prefix}{connector}[{role}] {name}  {}  {si} {}  {level}  {short}  {age}",
